@@ -1,0 +1,53 @@
+[project]
+name = "localdoc-intel"
+version = "1.0.0"
+description = "Local-first AI document intelligence with cited RAG answers."
+license = "PolyForm-Noncommercial-1.0.0"
+requires-python = ">=3.14"
+dependencies = [
+  "celery==5.6.3",
+  "django==5.2.15",
+  "django-environ==0.14.0",
+  "djangorestframework==3.17.1",
+  "kagglehub==0.3.13",
+  "psycopg[binary]==3.3.4",
+  "pypdf==6.14.2",
+  "qdrant-client==1.18.0",
+  "redis==8.0.1",
+  "requests==2.34.2",
+  "whitenoise==6.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black==26.5.1",
+  "pytest==9.1.1",
+  "pytest-django==4.12.0",
+  "pytest-mock==3.15.1",
+  "ruff==0.15.20",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+pythonpath = ["backend"]
+python_files = ["tests.py", "test_*.py", "*_tests.py"]
+testpaths = ["backend", "tests"]

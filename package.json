@@ -1,0 +1,16 @@
+{
+  "name": "localdoc-intel",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local-first AI document intelligence app with cited RAG answers.",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "lint": "npm --prefix frontend run lint",
+    "test": "npm --prefix frontend run test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0"
+}

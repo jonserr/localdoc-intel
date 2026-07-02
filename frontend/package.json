@@ -1,0 +1,49 @@
+{
+  "name": "localdoc-intel-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "3.9.0",
+    "@radix-ui/react-slot": "1.1.0",
+    "class-variance-authority": "0.7.0",
+    "clsx": "2.1.1",
+    "lucide-react": "0.468.0",
+    "next": "^16.2.10",
+    "next-themes": "^0.4.6",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-hook-form": "7.52.1",
+    "recharts": "^3.9.1",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "2.4.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.4.8",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "20.14.10",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "10.4.19",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.10",
+    "jsdom": "24.1.0",
+    "postcss": "^8.5.10",
+    "prettier": "3.3.3",
+    "tailwindcss": "3.4.6",
+    "typescript": "5.5.3",
+    "vitest": "2.0.5"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0"
+}
