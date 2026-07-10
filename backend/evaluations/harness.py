@@ -37,9 +37,12 @@ from retrieval.services import retrieve_chunks
 
 from evaluations.judging import AnswerJudgeProvider, judge_answer_quality
 
+# Minimum expected-term coverage required by the lexical groundedness proxy.
+GROUNDEDNESS_THRESHOLD = 0.5
+
 
 class EvaluationInputError(ValueError):
-    pass
+    """Raised when an evaluation question set cannot be loaded or validated."""
 
 
 def default_questions_path() -> Path:
@@ -57,6 +60,8 @@ def default_questions_path() -> Path:
 
 @dataclass(frozen=True)
 class QuestionResult:
+    """Metrics and generated output for one evaluated question."""
+
     question: str
     expected_document: str
     hit: bool
@@ -74,6 +79,8 @@ class QuestionResult:
 
 @dataclass(frozen=True)
 class EvaluationMetrics:
+    """Aggregate metrics and question-level details for an evaluation run."""
+
     question_count: int
     recall_at_k: float
     mean_reciprocal_rank: float
@@ -90,18 +97,20 @@ class EvaluationMetrics:
 
 
 def load_questions(path: Path) -> list[dict]:
+    """Load and validate a non-empty JSON question set from ``path``."""
+
     if not path.exists():
         raise EvaluationInputError(f"Questions file not found: {path}")
     try:
-        questions = json.loads(path.read_text(encoding="utf-8"))
+        question_rows = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise EvaluationInputError(f"Invalid JSON in {path}: {exc}") from exc
-    if not isinstance(questions, list) or not questions:
+    if not isinstance(question_rows, list) or not question_rows:
         raise EvaluationInputError("Questions file must be a non-empty JSON array.")
-    for row in questions:
-        if "question" not in row:
+    for question_data in question_rows:
+        if "question" not in question_data:
             raise EvaluationInputError("Each question needs a 'question' key.")
-    return questions
+    return question_rows
 
 
 def evaluate_question(
@@ -114,12 +123,14 @@ def evaluate_question(
     retrieval_only: bool = False,
     stage_callback: Callable[[str, dict], None] | None = None,
 ) -> QuestionResult:
+    """Evaluate retrieval and optional answer quality for one question."""
+
     def report(stage: str, elapsed_ms: int = 0, detail: str = "") -> None:
         if stage_callback:
             stage_callback(stage, {"elapsed_ms": elapsed_ms, "detail": detail})
 
     started = time.perf_counter()
-    retrieved = retrieve_chunks(
+    retrieved_chunks = retrieve_chunks(
         question=row["question"],
         collection=row.get("collection") or None,
         top_k=top_k,
@@ -127,26 +138,33 @@ def evaluate_question(
         rerank=rerank,
     )
     latency_ms = int((time.perf_counter() - started) * 1000)
-    report("retrieved", latency_ms, f"{len(retrieved)} chunks")
+    report("retrieved", latency_ms, f"{len(retrieved_chunks)} chunks")
 
     expected_document = row.get("expected_document") or ""
-    expected = expected_document.lower()
-    retrieved_documents = []
-    rank = 0
-    for index, item in enumerate(retrieved, start=1):
-        document = item.chunk.document
-        names = {document.title.lower(), document.original_filename.lower()}
+    expected_document_key = expected_document.lower()
+    retrieved_documents: list[str] = []
+    expected_document_rank = 0
+    for index, retrieved_chunk in enumerate(retrieved_chunks, start=1):
+        document = retrieved_chunk.chunk.document
+        document_names = {
+            document.title.lower(),
+            document.original_filename.lower(),
+        }
         retrieved_documents.append(document.title)
-        if expected and rank == 0 and expected in names:
-            rank = index
+        if (
+            expected_document_key
+            and expected_document_rank == 0
+            and expected_document_key in document_names
+        ):
+            expected_document_rank = index
 
     expected_terms = [term.lower() for term in row.get("expected_terms", [])]
     if expected_terms:
-        corpus = " ".join(item.chunk.text.lower() for item in retrieved)
-        covered = sum(1 for term in expected_terms if term in corpus)
-        term_coverage: float | None = covered / len(expected_terms)
-    elif expected:
-        term_coverage = 1.0 if rank else 0.0
+        retrieved_text = " ".join(item.chunk.text.lower() for item in retrieved_chunks)
+        covered_term_count = sum(1 for term in expected_terms if term in retrieved_text)
+        term_coverage: float | None = covered_term_count / len(expected_terms)
+    elif expected_document_key:
+        term_coverage = 1.0 if expected_document_rank else 0.0
     else:
         # Open-ended question: no expectations to score coverage against.
         term_coverage = None
@@ -161,7 +179,7 @@ def evaluate_question(
         generation_started = time.perf_counter()
         answer = generate_answer_text(
             question=row["question"],
-            retrieved=retrieved,
+            retrieved=retrieved_chunks,
             answer_generator=answer_generator,
         )
         generation_ms = int((time.perf_counter() - generation_started) * 1000)
@@ -171,7 +189,7 @@ def evaluate_question(
         judge_result = judge_answer_quality(
             question=row["question"],
             answer=answer,
-            context=build_context(retrieved),
+            context=build_context(retrieved_chunks),
             expected_terms=expected_terms,
             provider=answer_judge,
         )
@@ -192,8 +210,10 @@ def evaluate_question(
     return QuestionResult(
         question=row["question"],
         expected_document=expected_document,
-        hit=rank > 0,
-        reciprocal_rank=1.0 / rank if rank else 0.0,
+        hit=expected_document_rank > 0,
+        reciprocal_rank=(
+            1.0 / expected_document_rank if expected_document_rank else 0.0
+        ),
         term_coverage=term_coverage,
         latency_ms=latency_ms,
         retrieved_documents=retrieved_documents,
@@ -216,18 +236,26 @@ def run_evaluation(
     retrieval_only: bool = False,
     progress_callback: Callable[[str, dict, int, int, object], None] | None = None,
 ) -> EvaluationMetrics:
-    results = []
-    total = len(questions)
-    for index, row in enumerate(questions, start=1):
-        if progress_callback:
-            progress_callback("start", row, index, total, None)
+    """Run the configured pipeline and aggregate retrieval and answer metrics."""
 
-        def stage(name: str, info: dict, row=row, index=index) -> None:
+    question_results: list[QuestionResult] = []
+    question_count = len(questions)
+    for index, question_data in enumerate(questions, start=1):
+        if progress_callback:
+            progress_callback("start", question_data, index, question_count, None)
+
+        # Bind the current question and index so stage events retain their context.
+        def stage(
+            name: str,
+            info: dict,
+            question_data=question_data,
+            index=index,
+        ) -> None:
             if progress_callback:
-                progress_callback(name, row, index, total, info)
+                progress_callback(name, question_data, index, question_count, info)
 
         result = evaluate_question(
-            row,
+            question_data,
             top_k,
             mode,
             rerank,
@@ -236,49 +264,72 @@ def run_evaluation(
             retrieval_only=retrieval_only,
             stage_callback=stage,
         )
-        results.append(result)
+        question_results.append(result)
         if progress_callback:
-            progress_callback("done", row, index, total, result)
-    count = len(results)
-    labeled = [r for r in results if r.expected_document]
-    covered = [r for r in results if r.term_coverage is not None]
+            progress_callback("done", question_data, index, question_count, result)
+
+    # Metric-specific cohorts keep open-ended or unjudged questions from being
+    # counted as retrieval or answer-quality failures.
+    labeled_results = [
+        result for result in question_results if result.expected_document
+    ]
+    coverage_results = [
+        result for result in question_results if result.term_coverage is not None
+    ]
     judged_scores = [
         result.answer_quality_score
-        for result in results
+        for result in question_results
         if result.answer_quality_score is not None
     ]
     return EvaluationMetrics(
-        question_count=count,
+        question_count=question_count,
         recall_at_k=(
-            sum(1 for r in labeled if r.hit) / len(labeled) if labeled else 0.0
-        ),
-        mean_reciprocal_rank=(
-            sum(r.reciprocal_rank for r in labeled) / len(labeled) if labeled else 0.0
-        ),
-        citation_coverage=(
-            sum(r.term_coverage for r in covered) / len(covered) if covered else 0.0
-        ),
-        groundedness_score=(
-            sum(1 for r in covered if r.term_coverage >= 0.5) / len(covered)
-            if covered
+            sum(1 for result in labeled_results if result.hit) / len(labeled_results)
+            if labeled_results
             else 0.0
         ),
-        average_latency_ms=int(sum(r.latency_ms for r in results) / count),
+        mean_reciprocal_rank=(
+            sum(result.reciprocal_rank for result in labeled_results)
+            / len(labeled_results)
+            if labeled_results
+            else 0.0
+        ),
+        citation_coverage=(
+            sum(result.term_coverage for result in coverage_results)
+            / len(coverage_results)
+            if coverage_results
+            else 0.0
+        ),
+        groundedness_score=(
+            sum(
+                1
+                for result in coverage_results
+                if result.term_coverage >= GROUNDEDNESS_THRESHOLD
+            )
+            / len(coverage_results)
+            if coverage_results
+            else 0.0
+        ),
+        average_latency_ms=int(
+            sum(result.latency_ms for result in question_results) / question_count
+        ),
         top_k=top_k,
-        labeled_question_count=len(labeled),
-        coverage_question_count=len(covered),
+        labeled_question_count=len(labeled_results),
+        coverage_question_count=len(coverage_results),
         answer_quality_score=(
             sum(judged_scores) / len(judged_scores) if judged_scores else 0.0
         ),
         judged_answer_count=len(judged_scores),
         answer_judge_model=getattr(answer_judge, "model", settings.EVAL_JUDGE_MODEL),
-        results=results,
+        results=question_results,
     )
 
 
 def generate_answer_text(question: str, retrieved: list, answer_generator=None) -> str:
+    """Generate answer text using an injected provider or the default generator."""
+
     if answer_generator is not None:
-        result = answer_generator(question, retrieved)
+        generated_result = answer_generator(question, retrieved)
     else:
-        result = generate_answer(question, retrieved)
-    return str(getattr(result, "answer", result))
+        generated_result = generate_answer(question, retrieved)
+    return str(getattr(generated_result, "answer", generated_result))
