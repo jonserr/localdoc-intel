@@ -1,0 +1,34 @@
+[
+  {
+    "question": "What types of documents are in this collection?"
+  },
+  {
+    "question": "Which merchants, vendors, or organizations appear in these documents?"
+  },
+  {
+    "question": "What kinds of items were purchased, and in which currencies are the totals shown?"
+  },
+  {
+    "question": "Which parts of these scanned documents look garbled or hard to read?"
+  },
+  {
+    "question": "What type of document contains the 15.65 euro total, and what was purchased?",
+    "expected_document": "bk_20230212.pdf",
+    "expected_terms": ["burger king", "15.65"]
+  },
+  {
+    "question": "Which receipt includes the Whiskey Master Double burger?",
+    "expected_document": "bk_20230212.pdf",
+    "expected_terms": ["whiskey master double", "15.65"]
+  },
+  {
+    "question": "How much was the Amtrak rail ticket from CHI to STL on 22Sep22?",
+    "expected_document": "amtrak_20221016.pdf",
+    "expected_terms": ["53.00", "chi-stl"]
+  },
+  {
+    "question": "What was the price of the Caltrain day pass valid for unlimited travel between zones?",
+    "expected_document": "caltrain_20190510.pdf",
+    "expected_terms": ["day pass", "8.25"]
+  }
+]

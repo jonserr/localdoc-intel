@@ -1,0 +1,73 @@
+# Offline proof stack, layered on docker-compose.yml and compose.prod.yml.
+#
+# Every service joins an internal Compose network, so no container can reach
+# the internet, while the services still reach each other. The runtime images
+# and their commands are the everyday-use ones. `make offline-check` runs it.
+#
+# Default mode disables model-backed features. `make offline-check MODELS=live`
+# also starts a containerized Ollama that reads the host's already downloaded
+# models read-only, which proves embedding, retrieval, and cited generation
+# with no internet access at all.
+#
+# Requires Docker Compose 2.24 or later for !override and !reset.
+name: localdoc-offline
+
+x-offline-environment: &offline-environment
+  DJANGO_SETTINGS_MODULE: config.settings
+  DJANGO_SECRET_KEY: offline-check-only
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+  DATABASE_URL: postgres://localdoc:localdoc@db:5432/localdoc
+  REDIS_URL: redis://redis:6379/0
+  QDRANT_URL: http://qdrant:6333
+  # Closed local port by default; the live mode points this at the ollama service.
+  OLLAMA_BASE_URL: ${LOCALDOC_OFFLINE_OLLAMA_URL:-http://127.0.0.1:9}
+  OLLAMA_TIMEOUT_SECONDS: "60"
+  LLM_TIMEOUT_SECONDS: "600"
+  EMBEDDING_MODEL: ${LOCALDOC_OFFLINE_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+  LLM_MODEL: ${LOCALDOC_OFFLINE_LLM_MODEL:-hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M}
+  VECTOR_MIN_SCORE: "0.0"
+  VECTOR_INDEXING_ENABLED: ${LOCALDOC_OFFLINE_MODELS:-false}
+  VECTOR_SEARCH_ENABLED: ${LOCALDOC_OFFLINE_MODELS:-false}
+  ANSWER_GENERATION_ENABLED: ${LOCALDOC_OFFLINE_MODELS:-false}
+  ASYNC_INDEXING_ENABLED: "false"
+  OCR_ENABLED: "false"
+
+services:
+  # An internal network has no NAT, so no port can be published and the check
+  # runs inside the network instead of from the host.
+  frontend:
+    ports: !reset []
+
+  backend:
+    ports: !reset []
+    env_file: !reset []
+    extra_hosts: !reset []
+    environment: !override
+      <<: *offline-environment
+
+  celery:
+    env_file: !reset []
+    extra_hosts: !reset []
+    environment: !override
+      <<: *offline-environment
+
+  # Live mode only. The model directory is mounted read-only, so the check
+  # cannot download, change, or delete a model.
+  ollama:
+    profiles:
+      - models
+    image: ollama/ollama:${LOCALDOC_OLLAMA_IMAGE_TAG:-0.34.0}
+    pull_policy: never
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: /models
+      OLLAMA_KEEP_ALIVE: 10m
+    volumes:
+      - ${LOCALDOC_OLLAMA_MODELS:-${HOME}/.ollama/models}:/models:ro
+
+networks:
+  default:
+    # No route off the Compose network: this is what the check proves.
+    internal: true

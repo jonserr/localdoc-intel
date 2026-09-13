@@ -1,0 +1,120 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+    command: npm run dev -- --hostname 0.0.0.0
+    environment:
+      BACKEND_API_BASE_URL: http://backend:8000
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    # Loopback-only: the app has no authentication, so nothing is published
+    # on other host interfaces. See scripts/check_compose_ports.py.
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      # Recorded on each evaluation run; the container has no .git to read.
+      LOCALDOC_REVISION: ${LOCALDOC_REVISION:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+      - ./scripts:/scripts
+      - ./tests:/tests:ro
+      - ./pyproject.toml:/pyproject.toml:ro
+      - ./package.json:/package.json:ro
+      - ./frontend/package.json:/frontend/package.json:ro
+      - ./frontend/package-lock.json:/frontend/package-lock.json:ro
+      - ./examples:/examples
+      - ./cpp:/cpp
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  celery:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: celery -A config worker -l info
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      LOCALDOC_REVISION: ${LOCALDOC_REVISION:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+      - ./scripts:/scripts
+      - ./tests:/tests:ro
+      - ./pyproject.toml:/pyproject.toml:ro
+      - ./package.json:/package.json:ro
+      - ./frontend/package.json:/frontend/package.json:ro
+      - ./frontend/package-lock.json:/frontend/package-lock.json:ro
+      - ./examples:/examples
+      - ./cpp:/cpp
+    depends_on:
+      - backend
+      - redis
+
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: localdoc
+      POSTGRES_USER: localdoc
+      POSTGRES_PASSWORD: localdoc
+    # No host port: only containers on the compose network reach Postgres.
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U localdoc -d localdoc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    # No host port: only containers on the compose network reach Redis.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.0
+    environment:
+      # Qdrant reports anonymized usage statistics unless this is set.
+      # See scripts/check_privacy_defaults.py.
+      QDRANT__TELEMETRY_DISABLED: "true"
+    # No host port: only containers on the compose network reach Qdrant.
+    # To inspect a service from the host, add a loopback-only override, e.g.
+    #   services: { qdrant: { ports: ["127.0.0.1:6333:6333"] } }
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  frontend_node_modules:

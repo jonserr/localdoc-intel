@@ -1,0 +1,3 @@
+LocalDoc Intel sample input.
+This file is used by the C++ chunker smoke test.
+Chunks should preserve line ranges and byte offsets.

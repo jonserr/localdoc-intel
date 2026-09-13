@@ -1,0 +1,58 @@
+# Everyday-use stack, layered on docker-compose.yml.
+#
+# It runs the runtime images: gunicorn instead of the Django development
+# server, the Next.js standalone server instead of `next dev`, no source
+# mounts, no test or lint tooling, and non-root users. Your `.env` still
+# supplies models and service URLs; debug output is off.
+#
+# Start it with `make prod-up`, which builds the images first. Stop the
+# development stack before starting this one: both publish 3000 and 8000.
+# Requires Docker Compose 2.24 or later for !override and !reset.
+name: localdoc-prod
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      target: runner
+    image: localdoc-intel-frontend-runtime:${LOCALDOC_RELEASE_TAG:-release-check}
+    # Use the image's own command: node server.js
+    command: !reset null
+    environment:
+      BACKEND_API_BASE_URL: http://backend:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+      NODE_ENV: production
+    volumes: !reset []
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: runtime
+    image: localdoc-intel-backend-runtime:${LOCALDOC_RELEASE_TAG:-release-check}
+    # Use the image's own command: gunicorn
+    command: !reset null
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_DEBUG: "false"
+      LOCALDOC_REVISION: ${LOCALDOC_REVISION:-}
+    # Uploaded files live in a named volume rather than the source tree.
+    volumes: !override
+      - media_data:/app/media
+
+  celery:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: runtime
+    image: localdoc-intel-backend-runtime:${LOCALDOC_RELEASE_TAG:-release-check}
+    command: celery -A config worker -l info
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_DEBUG: "false"
+      LOCALDOC_REVISION: ${LOCALDOC_REVISION:-}
+    volumes: !override
+      - media_data:/app/media
+
+volumes:
+  media_data:

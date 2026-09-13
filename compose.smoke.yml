@@ -1,0 +1,53 @@
+# Isolated smoke stack for `make smoke-isolated`, layered on docker-compose.yml.
+# Runs the images built by `make images` without source mounts, disables every
+# model-backed feature, and publishes separate loopback ports. The project name
+# keeps its containers, network, and volumes apart from the development stack.
+# Service configuration is explicit: the developer .env is never loaded by
+# backend/celery, and service URLs always refer to the smoke network.
+# Requires Docker Compose 2.24 or later for !override and !reset.
+name: localdoc-smoke
+
+x-smoke-environment: &smoke-environment
+  DJANGO_SETTINGS_MODULE: config.settings
+  DJANGO_SECRET_KEY: isolated-smoke-only
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+  DATABASE_URL: postgres://localdoc:localdoc@db:5432/localdoc
+  REDIS_URL: redis://redis:6379/0
+  QDRANT_URL: http://qdrant:6333
+  # Closed local port; smoke must never contact the host model runtime.
+  OLLAMA_BASE_URL: http://127.0.0.1:9
+  VECTOR_MIN_SCORE: "0.0"
+  VECTOR_INDEXING_ENABLED: "false"
+  VECTOR_SEARCH_ENABLED: "false"
+  ANSWER_GENERATION_ENABLED: "false"
+  ASYNC_INDEXING_ENABLED: "false"
+  OCR_ENABLED: "false"
+
+services:
+  frontend:
+    image: localdoc-intel-frontend:${LOCALDOC_RELEASE_TAG:-release-check}
+    pull_policy: never
+    ports: !override
+      - "127.0.0.1:3900:3000"
+    volumes: !reset []
+
+  backend:
+    image: localdoc-intel-backend:${LOCALDOC_RELEASE_TAG:-release-check}
+    pull_policy: never
+    ports: !override
+      - "127.0.0.1:8900:8000"
+    volumes: !reset []
+    env_file: !reset []
+    extra_hosts: !reset []
+    environment: !override
+      <<: *smoke-environment
+
+  celery:
+    image: localdoc-intel-backend:${LOCALDOC_RELEASE_TAG:-release-check}
+    pull_policy: never
+    volumes: !reset []
+    env_file: !reset []
+    extra_hosts: !reset []
+    environment: !override
+      <<: *smoke-environment

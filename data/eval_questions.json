@@ -1,0 +1,92 @@
+[
+  {
+    "question": "What should be validated before promoting a release?",
+    "kind": "relevant",
+    "expected_document": "deployment_runbook.md",
+    "expected_terms": ["migrations", "cache", "queue worker"]
+  },
+  {
+    "question": "How often do service credentials rotate?",
+    "kind": "relevant",
+    "expected_document": "security_policy.md",
+    "expected_terms": ["90 days"]
+  },
+  {
+    "question": "When does the primary database take a full snapshot?",
+    "kind": "relevant",
+    "expected_document": "backup_schedule.md",
+    "expected_terms": ["02:00", "nightly snapshot"]
+  },
+  {
+    "question": "How do new engineers request development environment access?",
+    "kind": "relevant",
+    "expected_document": "onboarding_guide.md",
+    "expected_terms": ["access portal", "hiring manager"]
+  },
+  {
+    "question": "When must an incident be declared?",
+    "kind": "relevant",
+    "expected_document": "incident_response.md",
+    "expected_terms": ["one percent", "five minutes"]
+  },
+  {
+    "question": "Which line item is the largest share of quarterly cost?",
+    "kind": "relevant",
+    "expected_document": "cost_report.md",
+    "expected_terms": ["managed database", "38 percent"]
+  },
+  {
+    "question": "How long is a personal access token good for?",
+    "kind": "paraphrased",
+    "expected_document": "security_policy.md",
+    "expected_terms": ["30 days", "expire"]
+  },
+  {
+    "question": "How quickly must the writeup follow a resolved outage?",
+    "kind": "paraphrased",
+    "expected_document": "incident_response.md",
+    "expected_terms": ["postmortem", "five business days"]
+  },
+  {
+    "question": "How long are transaction log segments kept?",
+    "kind": "paraphrased",
+    "expected_document": "backup_schedule.md",
+    "expected_terms": ["write-ahead log", "seven days"]
+  },
+  {
+    "question": "Who decides whether to undo a bad release?",
+    "kind": "paraphrased",
+    "expected_document": "deployment_runbook.md",
+    "expected_terms": ["on-call", "rollback"]
+  },
+  {
+    "question": "What does the platform team own?",
+    "kind": "ambiguous",
+    "expected_terms": ["rotation", "access"]
+  },
+  {
+    "question": "How often does a review or drill happen each quarter?",
+    "kind": "ambiguous",
+    "expected_terms": ["quarter"]
+  },
+  {
+    "question": "What has to happen within a fixed number of days?",
+    "kind": "ambiguous",
+    "expected_terms": ["days"]
+  },
+  {
+    "question": "What is the orbital period of Enceladus?",
+    "kind": "unrelated",
+    "expect_no_results": true
+  },
+  {
+    "question": "Which cultivar produces the sweetest persimmon?",
+    "kind": "unrelated",
+    "expect_no_results": true
+  },
+  {
+    "question": "platypus astronomy quasar redshift",
+    "kind": "unrelated",
+    "expect_no_results": true
+  }
+]
