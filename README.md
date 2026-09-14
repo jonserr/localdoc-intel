@@ -116,7 +116,7 @@ Reindex every document after you change the embedding model. If the output dimen
 
 ## Adding your own documents
 
-`make demo-data` downloads the Kaggle receipts sample into `data/demo_intake/`. Replace those files with any local documents and run `make ingest-demo` again. The command scans the folder, skips hidden, temporary, empty, and unsupported files, shows a progress bar, logs each failure, and prints a summary. Intake files stay out of Git. Browser uploads show the same lifecycle.
+`make demo-data` downloads the Kaggle receipts sample into `data/demo_intake/`. It copies half the dataset by default, spread evenly rather than taking the first half, because filenames start with the merchant. The full set is about 1,150 receipts, which is more than a demo needs and turns a collection review into a long wait. Use `make demo-data DEMO_LIMIT=0` for everything, or set `DEMO_LIMIT` to any count. Replace those files with any local documents and run `make ingest-demo` again. The command scans the folder, skips hidden, temporary, empty, and unsupported files, shows a progress bar, logs each failure, and prints a summary. Intake files stay out of Git. Browser uploads show the same lifecycle.
 
 | Intake category | Supported formats | Extraction behavior |
 |---|---|---|
@@ -251,3 +251,107 @@ docs/        architecture, RAG design, evaluation, eval corpus, model card
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+
+### Chat performance and saved work
+
+Chat defaults to **Auto: lookups + matching sets**. Ordinary questions search indexed
+passages and let the configured local Ollama model answer. The local model
+classifies requests by meaning: matching sets of names, dates, identifiers,
+amounts or other discrete values use collection review, without requiring
+"all" or "list" in the question. Specific-document facts and explanations use
+passage lookup. Numeric sums and averages are not computed by this review.
+Routing decisions are cached for one day (up to 1,000 entries); the first new
+question adds a local classification call. Routing is not domain-specific. Saved
+reviews are reused only for the same question and unchanged collection.
+**Passage lookup** always uses top-k retrieval, even for a "name all" question.
+
+Reviews show actual extracted values directly in chat after each completed batch,
+including when stopped. In-progress and stopped downloads remain labeled incomplete.
+Completed reviews show the final extracted results. Lists longer than 50 results
+show a 50-result preview and a **Download full list (.txt)** button. The download
+includes every extracted result, the question, review status and coverage caveats.
+It does not include source excerpts, which load per result on demand. It is also
+available for shorter lists. Filenames include the question and unique
+review ID so different queries have distinct downloads. Partial reviews stay labeled partial in
+the download. The file is generated locally in the browser.
+
+Generated answers are cached in local PostgreSQL for one day, keyed by the exact
+question, numbered source context, collection sizes, model/server settings, and
+system instructions. Retrieval still runs, so changed evidence produces a new
+cache key. Only successful generation is cached; model failures and extractive
+fallbacks are not. The API/UI explicitly identifies a cached answer. The cache is
+bounded to 1,000 entries; no document content is sent to a hosted service.
+
+For example, an answer cached at 8:25 AM is not reused at 1:05 PM after 30
+new documents are added to the searched collection at noon: the collection
+size changes the cache key immediately, even before the one-day expiry.
+New text is searchable once ingestion creates its chunks; semantic search also
+requires its vector indexing to finish. Each chat request searches again, so new
+matching passages can enter the answer context. Top-k still limits what the
+model sees: a fresh answer can have the same wording when the selected evidence
+has not changed, and freshness does not guarantee an exhaustive collection review.
+
+**Full review (slow, explicit)** is for matching sets of names and values across stored text.
+It is optional and can be stopped or resumed from chat. Active reviews reappear
+when the page reloads. Stop prevents further batches; the current model call can
+finish or time out first (at most 30 seconds per review request). Completed batch
+progress is preserved. Only one review batch may run at a time across workers.
+
+Evidence-checked extraction results are cached per text segment, title, target,
+and model for 30 days (up to 10,000 entries). A later review can reuse unchanged
+segments, including segments with no extracted names, and process only misses.
+Different questions/targets may require new extraction. This is a cache of work
+actually performed, not a precomputed inventory of every possible fact.
+
+Review context defaults to 4,096 tokens when the detected backend memory budget
+is below 4 GiB and 8,192 otherwise, with bounded input segments and output tokens.
+`COLLECTION_REVIEW_CONTEXT_TOKENS` can override this within 4,096–16,384. Docker's
+memory budget is only a conservative hint; it is not the Mac's available unified
+GPU memory. Choosing a larger model or context can still make first-time work
+slow. These limits do not change the configured model or the lookup top-k limit.
+
+A completed review means its text segments were processed. OCR errors, aliases,
+unverified names, skipped segments, and documents without readable text can still
+affect an inventory; coverage and limitations are shown with the result.
+
+Review progress is shown once, as completed text segments and a percentage,
+with a current-batch timer while the model is working. A stopped review keeps
+its progress bar and matches; the bar never advances speculatively. Extraction
+asks the model only for values. Evidence quotes are copied and verified from
+stored text by the backend, avoiding redundant model-generated quotes.
+
+A review sends one text segment per model call. Measured on a 2,565-chunk
+receipt corpus with the default local model: 0.43 s per segment at one segment
+per call, 0.68 at two, 0.99 at four and 1.39 at twelve. Larger batches are
+slower because the model omits segments it was given, which forces the same
+text to be sent again at a smaller size. A single segment is retried once
+before it is recorded as unreviewed.
+
+A question is planned as a reusable **kind** plus an optional **restriction**.
+"Which burger chains appear as vendors?" plans as kind `merchant names` and
+restriction `is a burger chain`. Scanning is cached per kind, so a narrower or
+reworded question about the same kind reuses the earlier pass over the corpus
+instead of reading every document again. The restriction is then applied to the
+extracted values rather than to raw OCR text, where a small local model can
+judge "is a burger chain" about a merchant name but cannot reliably apply it
+while reading a scanned receipt. A value whose verdict fails stays visible and
+is judged again on a later batch, so a model failure never silently hides a
+result. Restriction verdicts are cached for 30 days.
+
+Values that differ only by a legal form or a trailing qualifier are shown as
+one result: `MADISON GmbH` and `MADISON Hotel GmbH` merge, and so do
+`dm-drogerie markt` and `dm-drogerie markt GmbH + Co. KG`. Every reviewed
+spelling stays listed, the displayed name is always a spelling that occurs in
+the text, and the text download records the merged spellings. A purely numeric
+value never absorbs a longer one. Names are matched against stored text
+ignoring case, character width, spacing and punctuation, so a curly apostrophe,
+a fullwidth digit, or Japanese and Chinese text written without spaces no
+longer drops a value that is present.
+
+Result previews and text downloads contain the extracted values, without loading
+all supporting excerpts. Verified source links stay in the saved review. Expand
+**Show sources** for a value to load its evidence on demand. In the same chat,
+questions such as `What references contain "Amtrak"?` use that review's saved
+matches without another model call. These references cover the processed part
+of that review and are checked against the current stored text.
