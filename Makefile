@@ -328,7 +328,7 @@ eval-published: env
 		--mode hybrid --top-k 5 --retrieval-only
 
 demo-data: env
-	docker compose run --rm --no-deps --build backend python manage.py download_demo_data
+	docker compose run --rm --no-deps --build backend python manage.py download_demo_data $(if $(DEMO_LIMIT),--limit $(DEMO_LIMIT),)
 
 ingest-demo: env
 	docker compose exec -T backend python manage.py ingest_demo
