@@ -4,6 +4,7 @@ from documents.models import Collection, Document, DocumentChunk
 from retrieval.services import RetrievedChunk
 
 from chat.generation import (
+    SYSTEM_INSTRUCTIONS,
     OllamaGenerationProvider,
     build_context,
     generate_answer,
@@ -236,3 +237,146 @@ def test_validate_citations_pure_function():
     assert validate_citations("[2] then [2] and [1]", 2).cited == [2, 1]
     assert validate_citations("[3]", 2).invalid == [3]
     assert validate_citations("", 0).status == "missing"
+
+
+@pytest.mark.django_db
+def test_context_reports_actual_source_count_not_document_count(retrieved_chunks):
+    context = build_context(retrieved_chunks)
+
+    assert "Retrieved sources supplied: 2 chunks." in context
+    assert "partial sample, not a complete collection review" in context
+    assert "Multiple chunks may come from the same document" in context
+    assert "Documents in the searched collection(s):" not in context
+    assert "Chunks in the searched collection(s):" not in context
+
+
+def test_empty_context_reports_zero_sources_and_known_empty_scope():
+    context = build_context([], collection_document_count=0, collection_chunk_count=0)
+
+    assert "Retrieved sources supplied: 0 chunks." in context
+    assert "Documents in the searched collection(s): 0." in context
+    assert "Chunks in the searched collection(s): 0." in context
+
+
+@pytest.mark.django_db
+def test_generation_supplies_coverage_to_model(retrieved_chunks, mocker):
+    provider = mocker.Mock(model="fake-model")
+    provider.generate.return_value = "Validate migrations [1]."
+
+    generate_answer(
+        "What is validated?",
+        retrieved_chunks,
+        provider=provider,
+        enabled=True,
+        collection_document_count=1158,
+        collection_chunk_count=2565,
+    )
+
+    question, context = provider.generate.call_args.args
+    assert question == "What is validated?"
+    assert "Retrieved sources supplied: 2 chunks." in context
+    assert "Documents in the searched collection(s): 1158." in context
+    assert "Chunks in the searched collection(s): 2565." in context
+
+
+def test_system_instructions_forbid_whole_collection_claims(mocker):
+    response = mocker.Mock()
+    response.json.return_value = {
+        "message": {"content": "The sources cannot settle it."}
+    }
+    post = mocker.patch("chat.generation.requests.post", return_value=response)
+
+    OllamaGenerationProvider().generate("What businesses are there?", "Sources:")
+
+    system = post.call_args.kwargs["json"]["messages"][0]
+    assert system == {"role": "system", "content": SYSTEM_INSTRUCTIONS}
+    assert "partial subset retrieved from a larger collection" in system["content"]
+    assert (
+        "Do not make whole-collection claims: counts, totals, inventories"
+        in system["content"]
+    )
+    assert "all, only, or none" in system["content"]
+    assert "When a question needs the full collection" in system["content"]
+    assert "retrieved sources cannot settle it" in system["content"]
+    assert "examples explicitly scoped to the retrieved sources" in system["content"]
+    assert "For a lookup about a specific document" in system["content"]
+
+
+def test_inventory_instructions_reject_exhaustive_sample_wording():
+    assert "full-inventory request, even without the word 'all'" in SYSTEM_INSTRUCTIONS
+    assert (
+        "first sentence must say that these retrieved passages cannot establish "
+        "the full list in the collection" in SYSTEM_INSTRUCTIONS
+    )
+    assert "Examples in the retrieved passages include" in SYSTEM_INSTRUCTIONS
+    assert (
+        "Never describe such an example list as 'only two', 'the only', or 'no other'"
+        in SYSTEM_INSTRUCTIONS
+    )
+    assert "even with the qualifier 'in the provided sources'" in SYSTEM_INSTRUCTIONS
+    assert "absence from an excerpt is not evidence of absence" in SYSTEM_INSTRUCTIONS
+    assert "For both inventory and entity-count questions" in SYSTEM_INSTRUCTIONS
+    assert "always call any names non-exhaustive examples" in SYSTEM_INSTRUCTIONS
+    assert (
+        "Do not characterize the documents as containing 'only a few' entities"
+        in SYSTEM_INSTRUCTIONS
+    )
+
+
+@pytest.mark.django_db
+def test_answer_cache_reuses_only_unchanged_evidence_and_question(
+    retrieved_chunks, mocker
+):
+    provider = mocker.Mock(model="fake-model")
+    provider.generate.return_value = "Validate migrations [1]."
+    first = generate_answer(
+        "What is validated?",
+        retrieved_chunks,
+        provider=provider,
+        enabled=True,
+        use_cache=True,
+    )
+    second = generate_answer(
+        "What is validated?",
+        retrieved_chunks,
+        provider=provider,
+        enabled=True,
+        use_cache=True,
+    )
+    assert not first.cached and second.cached
+    assert first.answer == second.answer
+    assert provider.generate.call_count == 1
+    retrieved_chunks[0].chunk.text = "Changed instructions."
+    changed = generate_answer(
+        "What is validated?",
+        retrieved_chunks,
+        provider=provider,
+        enabled=True,
+        use_cache=True,
+    )
+    assert not changed.cached
+    different = generate_answer(
+        "What changed?",
+        retrieved_chunks,
+        provider=provider,
+        enabled=True,
+        use_cache=True,
+    )
+    assert not different.cached
+    assert provider.generate.call_count == 3
+
+
+@pytest.mark.django_db
+def test_failed_generation_is_not_cached(retrieved_chunks, mocker):
+    provider = mocker.Mock(model="fake-model")
+    provider.generate.side_effect = requests.ConnectionError("offline")
+    for _ in range(2):
+        result = generate_answer(
+            "Question?",
+            retrieved_chunks,
+            provider=provider,
+            enabled=True,
+            use_cache=True,
+        )
+        assert result.mode == "extractive" and not result.cached
+    assert provider.generate.call_count == 2

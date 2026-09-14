@@ -118,6 +118,7 @@ def test_chat_query_exposes_citation_validation(
     client, indexed_chunk, settings, monkeypatch
 ):
     settings.ANSWER_GENERATION_ENABLED = True
+    monkeypatch.setattr("chat.views.inventory_target", lambda question, scope: None)
 
     class Provider:
         model = "fake-model"
@@ -138,3 +139,54 @@ def test_chat_query_exposes_citation_validation(
     assert payload["metadata"]["citation_status"] == "valid"
     assert payload["metadata"]["cited_sources"] == [1]
     assert payload["metadata"]["invalid_citations"] == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("collection", ["Platform", "platform", ""])
+@pytest.mark.parametrize("question, source_count", [("deployment", 1), ("platypus", 0)])
+def test_chat_coverage_matches_search_scope(
+    client, indexed_chunk, collection, question, source_count, settings, mocker
+):
+    # Unmatched chunks still belong to the scope; multiple chunks are not
+    # multiple documents. Another collection must only count in an all-scope query.
+    DocumentChunk.objects.create(
+        document=indexed_chunk.document, chunk_index=1, text="Unrelated content."
+    )
+    other = Document.objects.create(
+        collection=Collection.objects.create(name="Other"),
+        title="Other document",
+        original_filename="other.txt",
+        file_type="txt",
+        sha256="d" * 64,
+    )
+    DocumentChunk.objects.create(document=other, chunk_index=0, text="Other content.")
+    settings.ANSWER_GENERATION_ENABLED = True
+    mocker.patch("chat.views.inventory_target", return_value=None)
+    provider = mocker.Mock(model="fake-model")
+    provider.generate.return_value = "Validate migrations [1]."
+    mocker.patch("chat.generation.OllamaGenerationProvider", return_value=provider)
+
+    response = client.post(
+        reverse("chat-query"),
+        data={"question": question, "collection": collection, "top_k": 5},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    metadata = payload["metadata"]
+    documents, chunks = (1, 2) if collection else (2, 3)
+    assert (
+        metadata["retrieved_source_count"] == source_count == len(payload["citations"])
+    )
+    assert metadata["collection_document_count"] == documents
+    assert metadata["collection_chunk_count"] == chunks
+    assert metadata["retrieval_top_k"] == 5
+    if source_count:
+        context = provider.generate.call_args.args[1]
+        assert f"Retrieved sources supplied: {source_count} chunks." in context
+        assert f"Documents in the searched collection(s): {documents}." in context
+        assert f"Chunks in the searched collection(s): {chunks}." in context
+    else:
+        provider.generate.assert_not_called()
+        assert metadata["answer_mode"] == "no_results"

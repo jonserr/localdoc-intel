@@ -4,7 +4,7 @@ from pathlib import Path
 import environ
 
 from config.model_policy import validate_configured_models
-from config.resources import runtime_profile
+from config.resources import recommended_review_context, runtime_profile
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ROOT_DIR = BASE_DIR.parent
@@ -32,8 +32,14 @@ env = environ.Env(
     VECTOR_MIN_SCORE=(float, 0.0),
     OLLAMA_TIMEOUT_SECONDS=(float, 30.0),
     LLM_TIMEOUT_SECONDS=(float, 120.0),
+    # Interactive routing must fail fast and fall back, unlike a review batch.
+    ROUTING_TIMEOUT_SECONDS=(float, 30.0),
     LLM_TEMPERATURE=(float, 0.1),
     LLM_MAX_ANSWER_TOKENS=(int, 512),
+    COLLECTION_REVIEW_CONTEXT_TOKENS=(
+        int,
+        recommended_review_context(RUNTIME_PROFILE.memory_mb),
+    ),
     EVAL_JUDGE_MAX_TOKENS=(int, 200),
     EVAL_JUDGE_MAX_CONTEXT_CHARS=(int, 4000),
 )
@@ -156,10 +162,14 @@ validate_configured_models(
     }
 )
 LLM_TIMEOUT_SECONDS = env("LLM_TIMEOUT_SECONDS")
+ROUTING_TIMEOUT_SECONDS = env("ROUTING_TIMEOUT_SECONDS")
 LLM_TEMPERATURE = env("LLM_TEMPERATURE")
 # Response-length caps keep local inference latency predictable; raise them in
 # .env if you want longer answers or judge rationales.
 LLM_MAX_ANSWER_TOKENS = env("LLM_MAX_ANSWER_TOKENS")
+COLLECTION_REVIEW_CONTEXT_TOKENS = max(
+    4096, min(16384, env("COLLECTION_REVIEW_CONTEXT_TOKENS"))
+)
 EVAL_JUDGE_MAX_TOKENS = env("EVAL_JUDGE_MAX_TOKENS")
 EVAL_JUDGE_MAX_CONTEXT_CHARS = env("EVAL_JUDGE_MAX_CONTEXT_CHARS")
 # How long Ollama keeps models loaded between requests (avoids reload cost).

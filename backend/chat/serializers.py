@@ -6,6 +6,7 @@ from .models import ChatQuery
 
 class ChatQueryRequestSerializer(serializers.Serializer):
     question = serializers.CharField(trim_whitespace=True)
+    review_id = serializers.UUIDField(required=False)
     collection = serializers.CharField(required=False, allow_blank=True)
     retrieval_mode = serializers.ChoiceField(
         choices=["vector", "hybrid", "metadata-filtered"],
@@ -13,6 +14,9 @@ class ChatQueryRequestSerializer(serializers.Serializer):
     )
     top_k = serializers.IntegerField(min_value=1, max_value=20, default=5)
     rerank = serializers.BooleanField(default=False)
+    analysis_scope = serializers.ChoiceField(
+        choices=["auto", "retrieved", "collection"], default="auto"
+    )
 
     def validate_question(self, value: str) -> str:
         if not value:

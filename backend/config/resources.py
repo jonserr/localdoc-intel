@@ -94,3 +94,10 @@ def _read_cgroup_memory_limit() -> int | None:
         if 0 < value < _UNLIMITED_CGROUP_MEMORY:
             return value
     return None
+
+
+def recommended_review_context(memory_mb: int | None) -> int:
+    """Conservative context budget; Docker memory is not host GPU free memory."""
+    if memory_mb is not None and memory_mb < 4096:
+        return 4096
+    return 8192

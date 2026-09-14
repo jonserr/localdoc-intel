@@ -10,17 +10,43 @@ without any model running.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import requests
 from django.conf import settings
 from retrieval.services import RetrievedChunk
 
+from .cache import artifact_key, get_artifact, put_artifact
+
 SYSTEM_INSTRUCTIONS = (
     "You are a document question-answering assistant. Answer the user's "
-    "question using ONLY the numbered sources provided. Start your reply with "
-    "the direct answer (the specific value, name, or list requested) before "
-    "any explanation. Cite every claim with the matching source number in "
+    "question using ONLY the numbered sources provided. The numbered sources "
+    "are a partial subset retrieved from a larger collection, not a complete "
+    "review of it. Do not make whole-collection claims: counts, totals, "
+    "inventories, or claims that all, only, or none of the collection's "
+    "documents contain something. The supplied collection sizes describe "
+    "retrieval scope, not counts of businesses, vendors, or other entities. "
+    "When a question needs the full collection, start by stating that the "
+    "retrieved sources cannot settle it. You may then give examples explicitly "
+    "scoped to the retrieved sources, never an exhaustive list for the files "
+    "or collection. A question asking what businesses, vendors, or other "
+    "entities are in the files is a full-inventory request, even without "
+    "the word 'all'. For inventory requests, your first sentence must say "
+    "that these retrieved passages cannot establish the full list in the "
+    "collection. Explain that you have only the supplied number of source "
+    "chunks, not a review of every document. Introduce any names as "
+    "'Examples in the retrieved passages include', with citations. Never "
+    "describe such an example list as 'only two', 'the only', or 'no other', "
+    "even with the qualifier 'in the provided sources'. For both inventory "
+    "and entity-count questions, avoid exclusivity language about entities "
+    "even within the sample; always call any names non-exhaustive examples. "
+    "Do not characterize the documents as containing 'only a few' entities. "
+    "Sources may be "
+    "truncated excerpts; absence from an excerpt is not evidence of absence "
+    "from its document or the collection. For a lookup about a specific "
+    "document, start with the "
+    "direct answer supported by that document, including its stated values "
+    "or totals. Cite every claim from source content with its source number in "
     "square brackets, like [1] or [2]. If the sources do not contain the "
     "answer, say so explicitly. Be concise and factual. Do not invent "
     "citations or use outside knowledge."
@@ -62,6 +88,7 @@ class CitationValidation:
 class GenerationResult:
     answer: str
     mode: str  # "generated" | "extractive" | "no_results"
+    cached: bool = False
     model: str = ""
     error: str = ""
     citation_status: str = CITATIONS_NOT_APPLICABLE
@@ -131,8 +158,26 @@ class OllamaGenerationProvider:
         return answer
 
 
-def build_context(retrieved: list[RetrievedChunk]) -> str:
-    blocks = ["Sources:"]
+def build_context(
+    retrieved: list[RetrievedChunk],
+    *,
+    collection_document_count: int | None = None,
+    collection_chunk_count: int | None = None,
+) -> str:
+    blocks = [
+        "Sources:",
+        f"Retrieved sources supplied: {len(retrieved)} chunks. "
+        "These are a partial sample, not a complete collection review. "
+        "Multiple chunks may come from the same document.",
+    ]
+    if collection_document_count is not None:
+        blocks.append(
+            f"Documents in the searched collection(s): {collection_document_count}."
+        )
+    if collection_chunk_count is not None:
+        blocks.append(
+            f"Chunks in the searched collection(s): {collection_chunk_count}."
+        )
     for number, item in enumerate(retrieved, start=1):
         chunk = item.chunk
         location = source_location(chunk)
@@ -167,6 +212,10 @@ def generate_answer(
     retrieved: list[RetrievedChunk],
     provider: OllamaGenerationProvider | None = None,
     enabled: bool | None = None,
+    *,
+    collection_document_count: int | None = None,
+    collection_chunk_count: int | None = None,
+    use_cache: bool = False,
 ) -> GenerationResult:
     if not retrieved:
         return GenerationResult(
@@ -187,7 +236,27 @@ def generate_answer(
         )
 
     active_provider = provider or OllamaGenerationProvider()
-    context = build_context(retrieved)
+    context = build_context(
+        retrieved,
+        collection_document_count=collection_document_count,
+        collection_chunk_count=collection_chunk_count,
+    )
+    cache_key = artifact_key(
+        [
+            "generation-v1",
+            SYSTEM_INSTRUCTIONS,
+            question,
+            context,
+            active_provider.model,
+            settings.OLLAMA_BASE_URL,
+            settings.LLM_TEMPERATURE,
+            settings.LLM_MAX_ANSWER_TOKENS,
+        ]
+    )
+    if use_cache:
+        saved = get_artifact("generation", cache_key)
+        if saved is not None:
+            return GenerationResult(**{**saved, "cached": True})
     try:
         answer = active_provider.generate(question, context)
     except (requests.RequestException, GenerationError, ValueError) as exc:
@@ -218,10 +287,13 @@ def generate_answer(
             cited_sources=validation.cited,
             invalid_citations=validation.invalid,
         )
-    return GenerationResult(
+    result = GenerationResult(
         answer=answer,
         mode="generated",
         model=active_provider.model,
         citation_status=validation.status,
         cited_sources=validation.cited,
     )
+    if use_cache:
+        put_artifact("generation", cache_key, asdict(result))
+    return result
