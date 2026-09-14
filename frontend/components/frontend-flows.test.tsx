@@ -18,6 +18,10 @@ const mockApi = vi.hoisted(() => ({
   documentChunks: vi.fn(),
   uploadDocuments: vi.fn(),
   chatQuery: vi.fn(),
+  chatActiveAnalyses: vi.fn(),
+  chatAnalysisControl: vi.fn(),
+  chatAnalysis: vi.fn(),
+  chatAnalysisReferences: vi.fn(),
   chatHistory: vi.fn(),
   evaluations: vi.fn(),
   runEvaluation: vi.fn(),
@@ -106,6 +110,7 @@ beforeEach(() => {
   mockApi.status.mockResolvedValue(statusResponse);
   mockApi.collections.mockResolvedValue([]);
   mockApi.chatHistory.mockResolvedValue([]);
+  mockApi.chatActiveAnalyses.mockResolvedValue([]);
   mockApi.evaluations.mockResolvedValue([]);
 });
 
@@ -256,6 +261,9 @@ describe("chat", () => {
       metadata: {
         retrieval_mode: "hybrid",
         retrieval_top_k: 5,
+        retrieved_source_count: 1,
+        collection_document_count: 1158,
+        collection_chunk_count: 2565,
         embedding_model: "embed",
         llm_model: "llm",
         answer_mode: "generated",
@@ -275,15 +283,18 @@ describe("chat", () => {
     render(<ChatClient />);
 
     fireEvent.change(
-      screen.getByPlaceholderText(
-        "What dates, totals, vendors, or source files are visible?",
-      ),
+      screen.getByPlaceholderText("Ask a question about your documents..."),
       { target: { value: "What is the total?" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
     expect(
       await screen.findByText("The total is 12.34 [1]"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Retrieved source chunks: 1. Search scope: 1158 documents, 2565 stored chunks. Retrieved passages are a partial sample, not a complete collection review.",
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("Total 12.34")).toBeInTheDocument();
     expect(screen.getByText("score 0.92")).toBeInTheDocument();
@@ -295,9 +306,7 @@ describe("chat", () => {
     render(<ChatClient />);
 
     fireEvent.change(
-      screen.getByPlaceholderText(
-        "What dates, totals, vendors, or source files are visible?",
-      ),
+      screen.getByPlaceholderText("Ask a question about your documents..."),
       { target: { value: "Question?" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -362,9 +371,7 @@ describe("retrieval and citation reporting", () => {
     render(<ChatClient />);
 
     fireEvent.change(
-      screen.getByPlaceholderText(
-        "What dates, totals, vendors, or source files are visible?",
-      ),
+      screen.getByPlaceholderText("Ask a question about your documents..."),
       { target: { value: "What is validated?" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -401,9 +408,7 @@ describe("retrieval and citation reporting", () => {
     render(<ChatClient />);
 
     fireEvent.change(
-      screen.getByPlaceholderText(
-        "What dates, totals, vendors, or source files are visible?",
-      ),
+      screen.getByPlaceholderText("Ask a question about your documents..."),
       { target: { value: "What is validated?" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
@@ -738,4 +743,251 @@ describe("release status visibility", () => {
       }
     },
   );
+});
+
+const pendingReview = {
+  id: 91,
+  question: "List project names in the documents.",
+  answer: "Reviewing the full collection.",
+  citations: [],
+  inventory: [],
+  metadata: {
+    retrieval_mode: "hybrid",
+    retrieval_strategy: "collection_review",
+    retrieval_top_k: 5,
+    embedding_model: "embed",
+    llm_model: "llm",
+    answer_mode: "collection_analysis",
+    generation_error: "",
+    analysis_id: "review-1",
+    analysis_status: "queued",
+    analysis_units_processed: 2,
+    analysis_units_total: 10,
+    retrieved_source_count: 2,
+    collection_chunk_count: 10,
+    collection_document_count: 5,
+    retrieval_latency_ms: 0,
+    latency_ms: 20,
+  },
+};
+
+describe("chat performance controls", () => {
+  it("explains controls and defaults to fast chat without launching a review", async () => {
+    render(<ChatClient />);
+    expect(
+      await screen.findByRole("option", {
+        name: "Auto: lookups + matching sets",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Answer scope")).toHaveValue("auto");
+    expect(screen.getByLabelText("Collection")).toHaveAttribute(
+      "title",
+      "All collections",
+    );
+    expect(screen.getByLabelText("Top k")).toHaveAttribute("max", "20");
+    fireEvent.click(screen.getByText("How search works"));
+    expect(
+      screen.getByText(/“all” or “list” is not required/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/does not currently expose additional metadata filters/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Combines meaning-based vector search/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Several passages may come from one document/),
+    ).toBeInTheDocument();
+    expect(mockApi.chatQuery).not.toHaveBeenCalled();
+  });
+
+  it("restores an active review, stops polling when stopped, and offers resume", async () => {
+    mockApi.chatActiveAnalyses.mockResolvedValue([pendingReview]);
+    mockApi.chatAnalysis.mockResolvedValue(pendingReview);
+    mockApi.chatAnalysisControl
+      .mockResolvedValueOnce({
+        ...pendingReview,
+        answer: "Review stopped.",
+        metadata: { ...pendingReview.metadata, analysis_status: "cancelled" },
+      })
+      .mockResolvedValueOnce(pendingReview);
+    render(<ChatClient />);
+    fireEvent.click(await screen.findByRole("button", { name: "Stop review" }));
+    expect(await screen.findByText("Review stopped.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Stop review" }),
+    ).not.toBeInTheDocument();
+    expect(mockApi.chatAnalysisControl).toHaveBeenCalledWith(
+      "review-1",
+      "cancel",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Resume review" }));
+    expect(
+      await screen.findByRole("button", { name: "Stop review" }),
+    ).toBeInTheDocument();
+    expect(mockApi.chatAnalysisControl).toHaveBeenCalledWith(
+      "review-1",
+      "resume",
+    );
+    expect(mockApi.chatQuery).not.toHaveBeenCalled();
+  });
+
+  it("keeps a saved-reference reply when the shared review is stopped", async () => {
+    // A reference reply carries the same analysis_id but is not a review.
+    const referenceReply = {
+      ...pendingReview,
+      id: 92,
+      answer: 'Found 2 saved source passages for "Atlas".',
+      inventory: [],
+      metadata: {
+        ...pendingReview.metadata,
+        answer_mode: "review_references",
+        analysis_status: undefined,
+      },
+    };
+    mockApi.chatActiveAnalyses.mockResolvedValue([pendingReview]);
+    mockApi.chatAnalysis.mockResolvedValue(pendingReview);
+    mockApi.chatQuery.mockResolvedValue(referenceReply);
+    mockApi.chatAnalysisControl.mockResolvedValue({
+      ...pendingReview,
+      answer: "Review stopped.",
+      metadata: { ...pendingReview.metadata, analysis_status: "cancelled" },
+    });
+    render(<ChatClient />);
+    await screen.findByRole("button", { name: "Stop review" });
+    fireEvent.change(
+      screen.getByPlaceholderText("Ask a question about your documents..."),
+      { target: { value: 'What references contain "Atlas"?' } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(
+      await screen.findByText('Found 2 saved source passages for "Atlas".'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop review" }));
+    expect(await screen.findByText("Review stopped.")).toBeInTheDocument();
+    // Stopping the review must not overwrite the reference reply.
+    expect(
+      screen.getByText('Found 2 saved source passages for "Atlas".'),
+    ).toBeInTheDocument();
+  });
+
+  it("marks reused answers clearly", async () => {
+    mockApi.chatQuery.mockResolvedValue({
+      ...pendingReview,
+      answer: "Saved answer [1].",
+      metadata: {
+        ...pendingReview.metadata,
+        answer_mode: "generated",
+        answer_cached: true,
+        analysis_id: undefined,
+        analysis_status: undefined,
+      },
+    });
+    render(<ChatClient />);
+    fireEvent.change(
+      screen.getByPlaceholderText("Ask a question about your documents..."),
+      { target: { value: "Explain deployment." } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("cached answer")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Reused a saved local-model answer/),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("chat inventory preview", () => {
+  it.each([3, 50, 51, 75])(
+    "shows up to 50 results out of %i with a text download",
+    async (count) => {
+      mockApi.chatQuery.mockResolvedValue({
+        ...pendingReview,
+        answer: "Review finished.",
+        inventory: Array.from({ length: count }, (_, index) => ({
+          name: `Result ${index + 1}`,
+          source_number: 1,
+          evidence: "Source text",
+        })),
+        metadata: { ...pendingReview.metadata, analysis_status: "complete" },
+      });
+      render(<ChatClient />);
+      fireEvent.change(
+        screen.getByPlaceholderText("Ask a question about your documents..."),
+        { target: { value: "Who supplies us?" } },
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      const preview = await screen.findByRole("region", {
+        name: "Extracted results",
+      });
+      expect(within(preview).getAllByRole("listitem")).toHaveLength(
+        Math.min(count, 50),
+      );
+      expect(
+        within(preview).getByRole("button", {
+          name: "Download full list (.txt)",
+        }),
+      ).toBeInTheDocument();
+      expect(
+        within(preview).queryByText("Result 51 [1]"),
+      ).not.toBeInTheDocument();
+      if (count > 50)
+        expect(
+          within(preview).getByText(
+            `Showing the first 50 of ${count} results. Download the text file for the full extracted list.`,
+          ),
+        ).toBeInTheDocument();
+    },
+  );
+});
+
+it("previews actual merchant names while review is incomplete and retains them after stopping", async () => {
+  const running = {
+    ...pendingReview,
+    answer:
+      "Matches appear after each completed batch. Results are incomplete while the review is running.",
+    inventory: ["Walgreens", "Amtrak", "IN-N-OUT Burger"].map((name) => ({
+      name,
+    })),
+    metadata: {
+      ...pendingReview.metadata,
+      analysis_status: "running",
+      analysis_units_processed: 4,
+      analysis_units_total: 2565,
+      analysis_batch_elapsed_seconds: 10,
+    },
+  };
+  mockApi.chatActiveAnalyses.mockResolvedValue([running]);
+  mockApi.chatAnalysis.mockResolvedValue(running);
+  mockApi.chatAnalysisControl.mockResolvedValue({
+    ...running,
+    answer:
+      "Review stopped. Results below cover only the processed text. Resume to continue.",
+    metadata: { ...running.metadata, analysis_status: "cancelled" },
+  });
+  render(<ChatClient />);
+  const region = await screen.findByRole("region", {
+    name: "Extracted results",
+  });
+  for (const name of ["Walgreens", "Amtrak", "IN-N-OUT Burger"])
+    expect(within(region).getByText(name)).toBeInTheDocument();
+  // Evidence is not inlined, so nothing is fetched until a result is expanded.
+  expect(mockApi.chatAnalysisReferences).not.toHaveBeenCalled();
+  expect(within(region).queryByText(/Result ?0*1/)).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(
+      /Review status:|Saved progress through|Reviews every stored/,
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    within(region).getByRole("button", {
+      name: "Download results so far (.txt)",
+    }),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Stop review" }));
+  await screen.findByRole("button", { name: "Resume review" });
+  expect(screen.getByText("Stopped")).toBeInTheDocument();
+  expect(within(region).getByText("Walgreens")).toBeInTheDocument();
+  expect(
+    screen.getByRole("progressbar", { name: "Text segments processed" }),
+  ).toHaveAttribute("value", "4");
 });

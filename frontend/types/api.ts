@@ -95,7 +95,12 @@ export type Citation = {
   text_preview: string;
 };
 
-export type AnswerMode = "generated" | "extractive" | "no_results";
+export type AnswerMode =
+  | "generated"
+  | "extractive"
+  | "no_results"
+  | "collection_analysis"
+  | "review_references";
 
 export type CitationStatus =
   | "valid"
@@ -107,7 +112,16 @@ export type CitationStatus =
 export type ChatResponse = {
   id: number;
   answer: string;
+  question?: string;
   citations: Citation[];
+  inventory?: {
+    name: string;
+    // Every reviewed spelling when values were merged, display name included.
+    variants?: string[];
+    source_number?: number;
+    evidence?: string;
+    matches?: { source_number: number; evidence: string }[];
+  }[];
   metadata: {
     retrieval_mode: RetrievalMode;
     retrieval_top_k: number;
@@ -115,8 +129,30 @@ export type ChatResponse = {
     llm_model: string;
     answer_mode: AnswerMode;
     generation_error: string;
-    retrieval_strategy?: "vector" | "hybrid" | "bm25";
+    retrieval_strategy?: "vector" | "hybrid" | "bm25" | "collection_review";
     retrieval_fallback_reason?: string;
+    analysis_routing_error?: string;
+    analysis_id?: string;
+    analysis_status?:
+      | "queued"
+      | "running"
+      | "complete"
+      | "partial"
+      | "failed"
+      | "cancelled";
+    answer_cached?: boolean;
+    analysis_cached?: boolean;
+    analysis_cached_units?: number;
+    analysis_collection?: string;
+    analysis_context_tokens?: number;
+    analysis_batch_elapsed_seconds?: number | null;
+    analysis_units_processed?: number;
+    analysis_units_total?: number;
+    analysis_missing_document_ids?: number[];
+    analysis_inventory_count?: number | null;
+    retrieved_source_count?: number;
+    collection_document_count?: number | null;
+    collection_chunk_count?: number | null;
     citation_status?: CitationStatus;
     cited_sources?: number[];
     invalid_citations?: number[];
@@ -183,10 +219,12 @@ export type RuntimeProfile = {
 
 export type ChatQueryRequest = {
   question: string;
+  analysis_scope?: "auto" | "retrieved" | "collection";
   collection?: string;
   retrieval_mode: RetrievalMode;
   top_k: number;
   rerank: boolean;
+  review_id?: string;
 };
 
 export type ChatHistoryItem = {

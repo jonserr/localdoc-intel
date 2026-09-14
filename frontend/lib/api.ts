@@ -133,6 +133,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  chatAnalysisReferences: (id: string, value: string) =>
+    request<ChatResponse>(`/chat/analysis/${id}/references/`, undefined, {
+      value,
+    }),
+  chatAnalysis: (id: string) => request<ChatResponse>(`/chat/analysis/${id}/`),
+  chatActiveAnalyses: () => request<ChatResponse[]>("/chat/analyses/active/"),
+  chatAnalysisControl: (id: string, action: "cancel" | "resume") =>
+    request<ChatResponse>(`/chat/analysis/${id}/control/`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
   chatHistory: (query?: { collection?: string; retrieval_mode?: string }) =>
     request<ChatHistoryItem[]>("/chat/history/", undefined, query),
   evaluations: () => request<EvaluationRun[]>("/evaluations/"),
