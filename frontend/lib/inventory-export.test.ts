@@ -68,6 +68,23 @@ describe("inventory text export", () => {
     expect(text).toContain(response.answer);
   });
 
+  it("says how many extracted values the filter left unjudged", () => {
+    const text = inventoryText("Which values appear?", {
+      ...response,
+      metadata: {
+        ...response.metadata,
+        analysis_filter_total: 45,
+        analysis_filter_pending: 5,
+      },
+    });
+    expect(text).toContain(
+      "Filter: 5 extracted values are not listed because the filter did not judge them.",
+    );
+    expect(inventoryText("Which values appear?", response)).not.toContain(
+      "Filter:",
+    );
+  });
+
   it("records the merged spellings so the file is not lossy", () => {
     const text = inventoryText("Which values appear?", {
       ...response,

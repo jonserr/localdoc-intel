@@ -150,6 +150,10 @@ export type ChatResponse = {
     analysis_units_total?: number;
     analysis_missing_document_ids?: number[];
     analysis_inventory_count?: number | null;
+    /** Extracted values a restriction applies to; 0 when there is none. */
+    analysis_filter_total?: number;
+    /** Extracted values with no filter verdict yet. They are never results. */
+    analysis_filter_pending?: number;
     retrieved_source_count?: number;
     collection_document_count?: number | null;
     collection_chunk_count?: number | null;

@@ -14,6 +14,12 @@ export function inventoryText(
     `Collection: ${meta.analysis_collection || "All collections"}`,
     `Review ID: ${meta.analysis_id ?? "unknown"}`,
     `Coverage: ${meta.analysis_units_processed ?? "unknown"} of ${meta.analysis_units_total ?? "unknown"} text segments; ${meta.collection_document_count ?? "unknown"} documents, ${meta.collection_chunk_count ?? "unknown"} stored chunks.`,
+    // Undecided candidates are not results, so say how many were left out.
+    ...(meta.analysis_filter_pending
+      ? [
+          `Filter: ${meta.analysis_filter_pending} extracted values are not listed because the filter did not judge them.`,
+        ]
+      : []),
     response.answer,
     "",
     "Results:",

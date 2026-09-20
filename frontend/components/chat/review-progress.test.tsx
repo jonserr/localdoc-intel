@@ -63,4 +63,33 @@ describe("review progress", () => {
       screen.queryByText(/Reading the current batch/),
     ).not.toBeInTheDocument();
   });
+
+  it("reports filtering separately from extraction and hides it when settled", () => {
+    const { rerender } = render(
+      <ReviewProgress
+        metadata={{
+          ...metadata,
+          analysis_units_processed: 2565,
+          analysis_filter_total: 45,
+          analysis_filter_pending: 5,
+        }}
+      />,
+    );
+    expect(
+      screen.getByText(/40 of 45 extracted values judged/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/5 not listed until judged/)).toBeInTheDocument();
+    rerender(
+      <ReviewProgress
+        metadata={{
+          ...metadata,
+          analysis_filter_total: 45,
+          analysis_filter_pending: 0,
+        }}
+      />,
+    );
+    expect(
+      screen.queryByText(/extracted values judged/),
+    ).not.toBeInTheDocument();
+  });
 });

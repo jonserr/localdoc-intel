@@ -18,6 +18,9 @@ export function ReviewProgress({
     partial: "Incomplete",
   };
   const progress = `${processed.toLocaleString()} of ${total.toLocaleString()} text segments (${percentage.toFixed(2)}%)`;
+  // Filtering is a second pass over extracted values, so it has its own count.
+  const filterTotal = metadata.analysis_filter_total ?? 0;
+  const filterPending = metadata.analysis_filter_pending ?? 0;
   return (
     <section
       aria-label="Collection review progress"
@@ -45,6 +48,13 @@ export function ReviewProgress({
           : ""}
         {metadata.analysis_cached ? " · Saved review" : ""}
       </p>
+      {filterTotal > 0 && filterPending > 0 ? (
+        <p>
+          Filter: {(filterTotal - filterPending).toLocaleString()} of{" "}
+          {filterTotal.toLocaleString()} extracted values judged ·{" "}
+          {filterPending.toLocaleString()} not listed until judged
+        </p>
+      ) : null}
       {state === "running" ? (
         <p className="flex items-center gap-2">
           <span
