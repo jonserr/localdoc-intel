@@ -281,6 +281,82 @@ def test_name_matching_ignores_case_width_spacing_and_punctuation():
     assert located("Projects: Atlas.", "") is None
 
 
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        # A decimal separator is part of the number.
+        ("Dose 1.0 mg daily", "10 mg"),
+        ("Total 1,250 EUR", "1250 EUR"),
+        # A sign is part of the number.
+        ("Refund -500 USD", "500 USD"),
+        ("Adjustment +42 units", "42 units"),
+        # A value may not start or end inside a longer number or identifier.
+        ("Invoice 14/10/2018", "14"),
+        ("Order 2026-10-01", "01"),
+        ("Fee 125.00", "125"),
+        # A value may not start or end inside a different word.
+        ("Vendor: Wholesale Mart", "Sale Mart"),
+        ("Vendor: Wholesale-Mart", "Sale Mart"),
+        ("Supplier Northwind Traders", "Wind Traders"),
+        ("Merchant: Burgerville", "Burger"),
+        # A thousands separator and a tight identifier mark still bind.
+        ("Refund INV-2026-0117 issued", "0117"),
+        ("Charged 1.250,00 EUR", "250,00 EUR"),
+    ],
+)
+def test_a_materially_different_value_is_not_verified(text, name):
+    # Deliberately tighter than before: signs, decimal separators and
+    # digit-bearing punctuation survive normalization, and a match must sit on
+    # a value boundary. Every case here passed verification previously.
+    assert analysis.locate_name(text, name) is None
+
+
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        # Units and currency symbols still normalize away.
+        ("Dose 10 mg daily", "10mg"),
+        ("Fee $125.00 net", "125.00"),
+        # Typography, width and invisible formatting still normalize away.
+        ("Order 2026–10–01", "2026-10-01"),
+        ("Invoice １２３", "123"),
+        ("Contract 7­42", "742"),
+        # A hyphen between letters is an OCR artefact, not identity.
+        ("Vendor: Wal-Mart", "Wal Mart"),
+        ("Vendor: Wal Mart", "Wal-Mart"),
+        # A dropped mark before the value is a separator, not a word join.
+        ("Projects: Atlas Labs.", "Atlas Labs"),
+        ("(Atlas)", "Atlas"),
+        # A clean occurrence is found even when an unclean one comes first.
+        ("Wholesale Mart and Sale Mart", "Sale Mart"),
+        # Label punctuation is not part of the value it introduces. A mark
+        # binds to a number only when it is written tight against it.
+        ("Service charge: 125.00 EUR, net", "125.00 EUR"),
+        ("Line 01. Vendor: Shake Shack.", "Shake Shack"),
+        ("Total = 42 units", "42 units"),
+        ("Items (12) shipped", "12"),
+    ],
+)
+def test_a_legitimate_match_still_verifies(text, name):
+    assert analysis.locate_name(text, name) is not None
+
+
+def test_a_verified_value_points_at_its_own_source_span():
+    # The displayed value is tied to the span that supports it, not to the
+    # first place its characters happen to appear.
+    text = "Paid -500 USD, then 500 USD"
+    span = analysis.locate_name(text, "500 USD")
+    assert text[span[0] : span[1]] == "500 USD"
+    assert span[0] == text.index("500 USD", 10)
+    assert "500 USD" in analysis.evidence_from_source(text, span)
+
+
+def test_an_ocr_variant_is_not_silently_accepted_as_equivalent():
+    # OCR uncertainty in a number is a miss, not a verified equivalence.
+    assert analysis.locate_name("Amount 1O0 EUR", "100 EUR") is None
+    assert analysis.locate_name("Amount 100 EUR", "1OO EUR") is None
+
+
 def test_located_span_points_into_the_original_text():
     text = "Kasse: FR L\u2019Osteria GmbH, Bonn"
     span = analysis.locate_name(text, "FR L'Osteria GmbH")
@@ -1200,7 +1276,7 @@ def test_restriction_is_judged_on_values_not_on_raw_text(corpus, data, mocker):
 
 
 @pytest.mark.django_db
-def test_an_undecidable_restriction_keeps_values_instead_of_hiding_them(
+def test_an_undecidable_restriction_keeps_values_for_a_later_verdict(
     corpus, data, mocker
 ):
     mocker.patch("chat.tasks.analyze_collection_batch.delay")
@@ -1212,8 +1288,8 @@ def test_an_undecidable_restriction_keeps_values_instead_of_hiding_them(
         side_effect=analysis.IncompleteExtraction("returned a bare list"),
     )
     names = ["STARBUCKS", "FIVE GUYS"]
-    # Undecided, not "all match": the values stay visible and are judged again
-    # on a later batch rather than being silently accepted or dropped.
+    # Undecided, not "all match": the values are kept for a later batch rather
+    # than being silently accepted or dropped. They are not results meanwhile.
     assert analysis.restriction_matches(job, names) is None
     assert model.call_count == 2
 
@@ -1252,3 +1328,219 @@ def test_values_found_before_a_verdict_are_judged_later(corpus, data, mocker):
     shown = [item["name"] for item in analysis.analysis_summary(job)["inventory"]]
     assert shown == ["Atlas"]
     assert len(job.excluded) == 10
+
+
+@pytest.mark.django_db
+def test_a_follow_up_question_carrying_a_review_id_starts_a_second_review(
+    client, corpus, data, mocker
+):
+    # The chat page sends the previous review_id with every later question. The
+    # request serializer returns it as a UUID, which a JSONField cannot store,
+    # so the second submission used to fail while persisting the review.
+    import json
+
+    mocker.patch("chat.views.inventory_target", return_value="project names")
+    mocker.patch("chat.tasks.analyze_collection_batch.delay")
+    first = client.post(
+        reverse("chat-query"),
+        data={**data, "analysis_scope": "collection"},
+        content_type="application/json",
+    )
+    assert first.status_code == 202
+
+    second = client.post(
+        reverse("chat-query"),
+        data={
+            **data,
+            "question": "What error codes are in the documents?",
+            "analysis_scope": "collection",
+            "review_id": first.json()["metadata"]["analysis_id"],
+        },
+        content_type="application/json",
+    )
+    assert second.status_code == 202
+    job = CollectionAnalysis.objects.get(pk=second.json()["metadata"]["analysis_id"])
+    # The stored request is JSON, and the transient pointer is not part of it.
+    assert "review_id" not in job.request_metadata
+    assert json.loads(json.dumps(job.request_metadata)) == job.request_metadata
+    assert job.request_metadata["top_k"] == data["top_k"]
+
+    # The stored request stays usable: cancel and resume replay it.
+    control = reverse("chat-analysis-control", args=[job.id])
+    assert (
+        client.post(
+            control, {"action": "cancel"}, content_type="application/json"
+        ).json()["metadata"]["analysis_status"]
+        == "cancelled"
+    )
+    resumed = client.post(
+        control, {"action": "resume"}, content_type="application/json"
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["metadata"]["analysis_status"] == "queued"
+    assert resumed.json()["metadata"]["retrieval_top_k"] == data["top_k"]
+
+
+@pytest.fixture
+def wide_corpus():
+    """One chunk holding more values than a single filtering batch can judge."""
+    collection = Collection.objects.create(name="Research")
+    document = Document.objects.create(
+        collection=collection,
+        title="ledger.txt",
+        original_filename="ledger.txt",
+        sha256="a" * 64,
+        file_type="txt",
+        status="indexed",
+        chunk_count=1,
+    )
+    values = ", ".join(f"Vendor{index:03d}" for index in range(45))
+    return DocumentChunk.objects.create(
+        document=document, chunk_index=0, text=f"Merchants: {values}."
+    )
+
+
+def ledger_extraction(_system, prompt, _schema, _model, _tokens, timeout=None):
+    import json
+
+    return {
+        "sources": [
+            {
+                "id": source["id"],
+                "items": [
+                    {"name": value.strip()}
+                    for value in source["text"]
+                    .removeprefix("Merchants: ")
+                    .rstrip(".")
+                    .split(",")
+                ],
+            }
+            for source in json.loads(prompt)["sources"]
+        ]
+    }
+
+
+def chosen(*keep):
+    """A filter verdict that confirms only `keep` out of each supplied batch."""
+    return lambda _job, names: {"matching": [n for n in names if n in keep]}
+
+
+REVIEW = analysis.Plan("chosen vendors", "merchant names", "is chosen")
+
+
+@pytest.mark.django_db
+def test_an_unjudged_candidate_is_never_reported_as_a_confirmed_match(
+    wide_corpus, data, mocker
+):
+    # 45 extracted values and 40 judged per call: the last five have no verdict
+    # when the final segment is read, and a verdict is what makes a result.
+    mocker.patch("chat.tasks.analyze_collection_batch.delay")
+    model = mocker.patch("chat.analysis.model_json", side_effect=ledger_extraction)
+    mocker.patch(
+        "chat.analysis.ask_restriction", side_effect=chosen("Vendor000", "Vendor044")
+    )
+    job, _ = analysis.start_analysis(data, REVIEW)
+    analysis.analyze_batch(str(job.id))
+    job.refresh_from_db()
+
+    assert job.next_unit == len(job.units)
+    assert job.status == "queued"
+    pending = analysis.analysis_summary(job)
+    assert pending["metadata"]["analysis_filter_total"] == 45
+    assert pending["metadata"]["analysis_filter_pending"] == 5
+    assert [item["name"] for item in pending["inventory"]] == ["Vendor000"]
+    assert pending["metadata"]["analysis_inventory_count"] == 1
+    assert "waiting for a filter verdict" in pending["answer"]
+
+    # Filtering continues after extraction without reading any segment again.
+    analysis.analyze_batch(str(job.id))
+    job.refresh_from_db()
+    assert job.status == "complete"
+    assert model.call_count == 1
+    done = analysis.analysis_summary(job)
+    assert done["metadata"]["analysis_filter_pending"] == 0
+    assert [item["name"] for item in done["inventory"]] == ["Vendor000", "Vendor044"]
+    assert len(job.excluded) == 43
+
+
+@pytest.mark.django_db
+def test_a_saved_review_is_reusable_only_once_every_value_is_judged(
+    wide_corpus, data, mocker
+):
+    mocker.patch("chat.tasks.analyze_collection_batch.delay")
+    mocker.patch("chat.analysis.model_json", side_effect=ledger_extraction)
+    mocker.patch(
+        "chat.analysis.ask_restriction", side_effect=chosen("Vendor000", "Vendor044")
+    )
+    job, _ = analysis.start_analysis(data, REVIEW)
+    analysis.analyze_batch(str(job.id))
+    # A review with an open filter backlog is not a finished review.
+    assert analysis.completed_analysis(data) is None
+
+    analysis.analyze_batch(str(job.id))
+    saved = analysis.completed_analysis(data)
+    assert saved is not None and saved.pk == job.pk
+    cached = analysis.analysis_summary(saved, cached=True)
+    assert cached["metadata"]["analysis_cached"] is True
+    assert cached["metadata"]["analysis_filter_pending"] == 0
+    assert [item["name"] for item in cached["inventory"]] == ["Vendor000", "Vendor044"]
+
+
+@pytest.mark.django_db
+def test_an_undecidable_filter_fails_the_review_and_keeps_its_candidates(
+    wide_corpus, data, mocker
+):
+    mocker.patch("chat.tasks.analyze_collection_batch.delay")
+    mocker.patch("chat.analysis.model_json", side_effect=ledger_extraction)
+    mocker.patch("chat.analysis.ask_restriction", return_value=None)
+    job, _ = analysis.start_analysis(data, REVIEW)
+    for _ in range(analysis.FILTER_FAILURE_LIMIT):
+        analysis.analyze_batch(str(job.id))
+    job.refresh_from_db()
+
+    # Bounded: the review stops requeueing and says what it could not decide.
+    assert job.status == "failed"
+    assert job.filter_failures == analysis.FILTER_FAILURE_LIMIT
+    assert "Could not decide the filter for 45 extracted values" in job.error
+    assert len(job.entries) == 45
+    assert job.excluded == []
+    failed = analysis.analysis_summary(job)
+    assert failed["inventory"] == []
+    assert "Review failed" in failed["answer"]
+
+    # Recovery: a resubmission judges the kept candidates and reads no text.
+    mocker.patch("chat.analysis.ask_restriction", side_effect=chosen("Vendor007"))
+    resumed, cached = analysis.start_analysis(data, REVIEW)
+    assert not cached
+    assert resumed.pk == job.pk
+    assert resumed.filter_failures == 0
+    analysis.analyze_batch(str(resumed.id))
+    analysis.analyze_batch(str(resumed.id))
+    resumed.refresh_from_db()
+    assert resumed.status == "complete"
+    recovered = analysis.analysis_summary(resumed)
+    assert [item["name"] for item in recovered["inventory"]] == ["Vendor007"]
+    assert recovered["metadata"]["analysis_filter_pending"] == 0
+
+
+@pytest.mark.django_db
+def test_cancelling_during_filtering_persists_nothing_and_does_not_requeue(
+    wide_corpus, data, mocker
+):
+    enqueue = mocker.patch("chat.tasks.analyze_collection_batch.delay")
+    mocker.patch("chat.analysis.model_json", side_effect=ledger_extraction)
+    job, _ = analysis.start_analysis(data, REVIEW)
+
+    def cancel_during_filtering(current, names):
+        analysis.cancel_analysis(current)
+        return {"matching": list(names)}
+
+    mocker.patch("chat.analysis.ask_restriction", side_effect=cancel_during_filtering)
+    analysis.analyze_batch(str(job.id))
+    job.refresh_from_db()
+
+    assert job.status == "cancelled"
+    assert job.next_unit == 0
+    assert job.entries == {}
+    assert enqueue.call_count == 1
+    assert analysis.analysis_summary(job)["inventory"] == []

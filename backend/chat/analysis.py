@@ -39,6 +39,9 @@ SEGMENT_RETRIES = 1
 # 11.9s, 6 kept 6 in 17.1s. Smaller lists are slower and worse, because the model
 # falls back on word similarity and starts accepting "Hamburg Hbf".
 RESTRICTION_BATCH = 40
+# Filtering batches the model may fail in a row once every segment is read.
+# Without a bound, an unavailable filter requeues the review forever.
+FILTER_FAILURE_LIMIT = 3
 TRANSIENT_RETRIES = 2
 TRANSIENT_BACKOFF_SECONDS = 5
 PLAN_SCHEMA = {
@@ -171,40 +174,211 @@ def normalized_text(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def match_signature(text: str) -> tuple[str, list[int]]:
-    """Alphanumeric signature of text, with each kept character's own offset.
+# Typography that word processors and OCR substitute freely and that NFKC does
+# not fold. None of these substitutions changes what a value is.
+TYPOGRAPHY = {
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201a": "'",
+    "\u201b": "'",
+    "\u2032": "'",
+    "\u00b4": "'",
+    "\u02bc": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u201e": '"',
+    "\u201f": '"',
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2015": "-",
+    "\u2212": "-",
+    "\u2044": "/",
+    "\u2215": "/",
+}
+# Marks that stay in a signature, because dropping one changes the value.
+# "1.0" is not "10", "-500" is not "500", and "2026-10-01" is not "20261001".
+DECIMAL_MARKS = frozenset(".,")
+SIGN_MARKS = frozenset("-+")
+IDENTIFIER_MARKS = frozenset("-/")
+# A digit at the edge of a match next to one of these belongs to a longer
+# number or identifier, so the match is a fragment of a different value.
+NUMERIC_NEIGHBOURS = DECIMAL_MARKS | SIGN_MARKS | IDENTIFIER_MARKS
+# Scripts that write without spaces. They have no word edges to respect, so a
+# match inside one of them is not a fragment of a neighbouring word.
+CONTINUOUS_SCRIPT = re.compile(
+    "[\u2e80-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    "\u0e00-\u0e7f\u0e80-\u0eff\u1000-\u109f\u1780-\u17ff"
+    "\U00020000-\U0002fa1f]"
+)
+
+
+def folded_characters(text: str) -> list[tuple[str, int]]:
+    """Normalized characters, each carrying the offset of its source character.
 
     NFKC folds fullwidth and ligature forms, so a value written "ｎ" matches an
-    "n" in the source. Punctuation and whitespace are dropped, which is what
-    makes a curly apostrophe, an OCR hyphen, or a missing space harmless.
+    "n" in the source. Invisible formatting characters, such as a soft hyphen
+    or a zero-width joiner, carry no meaning and are removed.
     """
+    folded: list[tuple[str, int]] = []
+    for index, character in enumerate(text):
+        replacement = TYPOGRAPHY.get(character, character)
+        for piece in unicodedata.normalize("NFKC", replacement).casefold():
+            if unicodedata.category(piece) != "Cf":
+                folded.append((piece, index))
+    return folded
+
+
+def significant_mark(
+    mark: str, previous: str, following: str, before: str, after: str
+) -> bool:
+    """Whether a non-alphanumeric character changes the value it sits in.
+
+    A decimal separator is about the two digits around it, so it uses `before`
+    and `after`, which skip whitespace: "1 . 0" is still one number. A sign and
+    an identifier mark only bind when written tight against their characters,
+    so they use `previous` and `following`. Loosening those would keep ordinary
+    label punctuation: the colon in "Service charge: 125.00" and the full stop
+    in "Line 01. Vendor" both sit between alphanumerics next to a digit.
+    """
+    if mark in DECIMAL_MARKS and before.isdigit() and after.isdigit():
+        return True
+    if mark in SIGN_MARKS and following.isdigit() and not previous.isalnum():
+        return True
+    return (
+        mark in IDENTIFIER_MARKS
+        and previous.isalnum()
+        and following.isalnum()
+        and (previous.isdigit() or following.isdigit())
+    )
+
+
+def match_signature(text: str) -> tuple[str, list[int]]:
+    """Comparison signature of text, with each kept character's own offset.
+
+    Alphanumeric characters are always kept. A mark is kept only where it
+    changes the value: a decimal separator, a leading sign, or punctuation that
+    joins a digit to another character. Every other mark and all whitespace are
+    dropped, which is what keeps a curly apostrophe, a hyphen between letters,
+    or a missing space harmless.
+    """
+    folded = folded_characters(text)
+    pieces = [piece for piece, _ in folded]
+    before: list[str] = []
+    seen = ""
+    for piece in pieces:
+        before.append(seen)
+        if not piece.isspace():
+            seen = piece
+    after = [""] * len(folded)
+    seen = ""
+    for index in range(len(folded) - 1, -1, -1):
+        after[index] = seen
+        if not pieces[index].isspace():
+            seen = pieces[index]
+
     chars: list[str] = []
     offsets: list[int] = []
-    for index, character in enumerate(text):
-        for piece in unicodedata.normalize("NFKC", character).casefold():
-            if piece.isalnum():
-                chars.append(piece)
-                offsets.append(index)
+    for index, (piece, offset) in enumerate(folded):
+        if piece.isalnum() or significant_mark(
+            piece,
+            pieces[index - 1] if index else "",
+            pieces[index + 1] if index + 1 < len(pieces) else "",
+            before[index],
+            after[index],
+        ):
+            chars.append(piece)
+            offsets.append(offset)
     return "".join(chars), offsets
 
 
+def spaced_word_character(character: str) -> bool:
+    """An alphanumeric character in a script that separates words with spaces."""
+    return character.isalnum() and not CONTINUOUS_SCRIPT.match(character)
+
+
+def source_adjacent(text: str, offsets: list[int], left: int) -> bool:
+    """Whether two signature characters touch in the source text.
+
+    Only invisible formatting may sit between them. A space or a dropped mark
+    separates them.
+    """
+    between = text[offsets[left] + 1 : offsets[left + 1]]
+    return all(unicodedata.category(character) == "Cf" for character in between)
+
+
+def joins_word(text: str, haystack: str, offsets: list[int], left: int) -> bool:
+    """Whether the signature characters at `left` and `left + 1` are one word.
+
+    Two spaced-script characters form one word when the source does not
+    separate them, so "Sale Mart" does not start inside "Wholesale Mart" while
+    "Atlas Labs" still matches "Atlas: Labs".
+    """
+    return (
+        spaced_word_character(haystack[left])
+        and spaced_word_character(haystack[left + 1])
+        and source_adjacent(text, offsets, left)
+    )
+
+
+def splits_number(text: str, haystack: str, offsets: list[int], left: int) -> bool:
+    """Whether a digit at `left` or `left + 1` belongs to a longer value.
+
+    A mark only binds to a number it touches, so the full stop in "Line 01."
+    and a thousands comma both stay out of it.
+    """
+    mark, digit = (
+        (haystack[left], haystack[left + 1])
+        if haystack[left + 1].isdigit()
+        else (haystack[left + 1], haystack[left])
+    )
+    return (
+        digit.isdigit()
+        and mark in NUMERIC_NEIGHBOURS
+        and source_adjacent(text, offsets, left)
+    )
+
+
+def edges_are_clean(
+    text: str, haystack: str, offsets: list[int], position: int, length: int
+) -> bool:
+    """Whether a signature match is a whole value rather than part of another."""
+
+    def splits(left: int) -> bool:
+        return joins_word(text, haystack, offsets, left) or splits_number(
+            text, haystack, offsets, left
+        )
+
+    end = position + length
+    if position and splits(position - 1):
+        return False
+    return not (end < len(haystack) and splits(end - 1))
+
+
 def locate_name(text: str, name: str) -> tuple[int, int] | None:
-    """Find a value in source text, ignoring case, width, spacing and punctuation.
+    """Find a value in source text, ignoring case, width, spacing and typography.
 
     The span returned always points into the original text, so the evidence
     quote stays verbatim. Matching is looser than an exact substring because
     Japanese and Chinese write without spaces, and OCR swaps quote and dash
     characters freely; requiring an exact match dropped values that are plainly
-    present. The value's characters must still occur in order and together.
+    present. It is not loose about meaning: signs, decimal separators and
+    digit-bearing punctuation survive normalization, and a match must start and
+    end on a value boundary, so "10 mg" does not match "1.0 mg" and "Sale Mart"
+    does not match "Wholesale Mart".
     """
     haystack, offsets = match_signature(text)
     needle, _ = match_signature(name)
     if not needle:
         return None
     position = haystack.find(needle)
-    if position < 0:
-        return None
-    return offsets[position], offsets[position + len(needle) - 1] + 1
+    while position >= 0:
+        if edges_are_clean(text, haystack, offsets, position, len(needle)):
+            return offsets[position], offsets[position + len(needle) - 1] + 1
+        position = haystack.find(needle, position + 1)
+    return None
 
 
 def evidence_from_source(text: str, span: tuple[int, int]) -> str:
@@ -458,10 +632,29 @@ def scope_snapshot(collection: str) -> tuple[str, list[dict], int, list[int]]:
     return digest.hexdigest(), units, len(docs), sorted(set(doc_ids) - with_text)
 
 
+def request_snapshot(data: dict) -> dict:
+    """The JSON-safe part of a chat request, as stored on the review.
+
+    ``request_metadata`` is a JSONField and is replayed to resume a review, so
+    it holds primitives only. The request serializer returns ``review_id`` as a
+    UUID, which is neither JSON serializable nor part of this review: it names
+    the earlier review a follow-up question refers to.
+    """
+    return {
+        "question": data["question"],
+        "collection": data.get("collection", ""),
+        "retrieval_mode": data["retrieval_mode"],
+        "top_k": data["top_k"],
+        "rerank": bool(data.get("rerank", False)),
+        "analysis_scope": data.get("analysis_scope", "auto"),
+    }
+
+
 def start_analysis(data: dict, target) -> tuple[CollectionAnalysis, bool]:
     from .tasks import analyze_collection_batch
 
     plan = Plan.of(target)
+    metadata = request_snapshot(data)
     collection = data.get("collection", "")
     fingerprint, units, doc_count, missing = scope_snapshot(collection)
     key = hashlib.sha256(
@@ -489,7 +682,7 @@ def start_analysis(data: dict, target) -> tuple[CollectionAnalysis, bool]:
                 "document_count": doc_count,
                 "missing_documents": missing,
                 "chunk_count": len({u["chunk_id"] for u in units}),
-                "request_metadata": data,
+                "request_metadata": metadata,
             },
         )
         # A subsequent explicit submission may resume a failed batch. There is
@@ -497,16 +690,19 @@ def start_analysis(data: dict, target) -> tuple[CollectionAnalysis, bool]:
         schedule = created or job.status in {"failed", "cancelled"}
         if created:
             query = ChatQuery.objects.create(
-                question=data["question"],
+                question=metadata["question"],
                 collection=collection,
-                retrieval_mode=data["retrieval_mode"],
-                retrieval_top_k=data["top_k"],
+                retrieval_mode=metadata["retrieval_mode"],
+                retrieval_top_k=metadata["top_k"],
                 answer="Full-collection review queued.",
             )
             job.query = query
         if schedule:
             job.status = "queued"
             job.error = ""
+            # A resubmission is the only retry for a filter the model could not
+            # decide, so give the backlog a fresh allowance.
+            job.filter_failures = 0
             job.save()
     if schedule:
         try:
@@ -673,6 +869,54 @@ def validate_extraction(payload: dict, sources: list[dict]) -> tuple[list[dict],
     return entries, unverified
 
 
+def pending_keys(job: CollectionAnalysis) -> list[str]:
+    """Extracted values whose restriction verdict is still unknown.
+
+    A review has three kinds of value: a confirmed match, a confirmed
+    nonmatch, and a candidate no verdict covers yet. Only the first kind is a
+    result.
+    """
+    if not job.restriction:
+        return []
+    return [key for key, entry in job.entries.items() if "passes" not in entry]
+
+
+def confirmed_entries(job: CollectionAnalysis) -> list[dict]:
+    """Values the restriction confirmed. An undecided candidate is not one."""
+    if not job.restriction:
+        return list(job.entries.values())
+    return [entry for entry in job.entries.values() if entry.get("passes") is True]
+
+
+def judge_pending(job: CollectionAnalysis) -> None:
+    """Judge one bounded batch of undecided values against the restriction.
+
+    Extraction and filtering advance independently. A value found before the
+    filter could decide it is caught up here, and the backlog keeps draining
+    after the last segment is read, without re-reading any text.
+    """
+    if not job.restriction:
+        return
+    batch = pending_keys(job)[:RESTRICTION_BATCH]
+    if not batch:
+        return
+    if not CollectionAnalysis.objects.filter(pk=job.pk, status="running").exists():
+        return
+    names = [job.entries[key]["name"] for key in batch]
+    keep = restriction_matches(job, names)
+    if keep is None:
+        # Keep the candidates for a later attempt. They are not results until
+        # a verdict covers them, and they are not dropped either.
+        job.filter_failures += 1
+        return
+    for key, name in zip(batch, names, strict=True):
+        job.entries[key]["passes"] = name in keep
+    job.filter_failures = 0
+    job.excluded = sorted(
+        key for key, entry in job.entries.items() if entry.get("passes") is False
+    )
+
+
 def restriction_matches(job: CollectionAnalysis, names: list[str]) -> set[str] | None:
     """Which of `names` satisfy the job's restriction.
 
@@ -818,25 +1062,14 @@ def analyze_batch(job_id: str) -> None:
                     if hit not in hits:
                         hits.append(hit)
             job.entries = merged
-            if job.restriction:
-                # Judge every value that has no verdict yet, not only the ones
-                # this batch found. A value discovered before the restriction
-                # could be applied is caught up here instead of shown unjudged.
-                undecided = [
-                    key for key, entry in merged.items() if "passes" not in entry
-                ][:RESTRICTION_BATCH]
-                if undecided:
-                    names = [merged[key]["name"] for key in undecided]
-                    keep = restriction_matches(job, names)
-                    if keep is not None:
-                        for key, name in zip(undecided, names, strict=True):
-                            merged[key]["passes"] = name in keep
-                        job.entries = merged
-                job.excluded = sorted(
-                    key for key, entry in merged.items() if entry.get("passes") is False
-                )
             job.next_unit = next_unit
-        if job.next_unit == len(job.units):
+        # Judge every value without a verdict, not only the ones this batch
+        # found, and keep judging once the last segment is read.
+        judge_pending(job)
+        pending = pending_keys(job)
+        extracted = job.next_unit == len(job.units)
+        job.error = ""
+        if extracted and not pending:
             fingerprint, _, _, _ = scope_snapshot(job.collection)
             if fingerprint != job.scope_hash:
                 raise AnalysisError(
@@ -845,6 +1078,15 @@ def analyze_batch(job_id: str) -> None:
             job.status = (
                 "partial" if job.missing_documents or job.skipped_units else "complete"
             )
+        elif extracted and job.filter_failures >= FILTER_FAILURE_LIMIT:
+            # Bounded, not endless: stop requeueing and say what is unresolved.
+            # The extracted values are kept, so a resubmission judges only them.
+            job.status = "failed"
+            job.error = (
+                f"Could not decide the filter for {len(pending)} extracted values "
+                f"after {job.filter_failures} attempts. Resubmit to judge them; "
+                "the reviewed text is kept."
+            )
         else:
             job.status = "queued"
         updated = CollectionAnalysis.objects.filter(pk=job.pk, status="running").update(
@@ -852,6 +1094,8 @@ def analyze_batch(job_id: str) -> None:
             excluded=job.excluded,
             next_unit=job.next_unit,
             status=job.status,
+            error=job.error,
+            filter_failures=job.filter_failures,
             unverified_count=job.unverified_count,
             skipped_units=job.skipped_units,
             cached_units=job.cached_units,
@@ -883,10 +1127,10 @@ def analysis_response(
     reviewed_ids = {u["chunk_id"] for u in job.units[: job.next_unit]}
     # Long chunks count as reviewed only after their final segment completes.
     reviewed_ids -= {u["chunk_id"] for u in job.units[job.next_unit :]}
-    excluded = set(job.excluded)
-    entries = group_entries(
-        [entry for key, entry in job.entries.items() if key not in excluded]
-    )
+    # Only confirmed matches are results. A confirmed nonmatch and a candidate
+    # the filter has not judged are both left out of the list and the counts.
+    undecided = len(pending_keys(job))
+    entries = group_entries(confirmed_entries(job))
 
     def sources(entry):
         return entry["sources"]
@@ -960,6 +1204,11 @@ def analysis_response(
                 f" {job.unverified_count} extracted names were dropped because the "
                 "reviewed text did not contain them."
             )
+        if undecided:
+            answer += (
+                f" {undecided} extracted values are not listed: the model did not "
+                f"decide whether they satisfy '{job.restriction}'. Resubmit to judge them."
+            )
         if job.missing_documents:
             answer += f" Review is incomplete: {len(job.missing_documents)} documents have no readable stored text."
     elif job.status == "cancelled":
@@ -968,6 +1217,10 @@ def analysis_response(
         answer = "Review failed. No complete result list is available. Resume after addressing the error."
     else:
         answer = "Matches appear after each completed batch. Results are incomplete while the review is running."
+        if undecided:
+            answer += (
+                f" {undecided} extracted values are still waiting for a filter verdict."
+            )
     metadata = job.request_metadata
     return {
         "id": job.query_id,
@@ -1020,6 +1273,11 @@ def analysis_response(
             ),
             "analysis_unverified_count": job.unverified_count,
             "analysis_skipped_units": job.skipped_units,
+            # Filtering progress is separate from extraction progress: the
+            # total is every extracted value a restriction applies to, and the
+            # pending count is how many of them have no verdict yet.
+            "analysis_filter_total": len(job.entries) if job.restriction else 0,
+            "analysis_filter_pending": undecided,
         },
     }
 

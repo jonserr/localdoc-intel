@@ -41,6 +41,9 @@ class CollectionAnalysis(models.Model):
     chunk_count = models.PositiveIntegerField(default=0)
     missing_documents = models.JSONField(default=list)
     entries = models.JSONField(default=dict)
+    # Consecutive filtering batches the model could not decide. It bounds the
+    # retry loop so a review never requeues forever on an unavailable filter.
+    filter_failures = models.PositiveIntegerField(default=0)
     unverified_count = models.PositiveIntegerField(default=0)
     skipped_units = models.PositiveIntegerField(default=0)
     cached_units = models.PositiveIntegerField(default=0)
